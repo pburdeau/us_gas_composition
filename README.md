@@ -8,9 +8,9 @@ Preprint available at: [https://www.researchsquare.com/article/rs-6531662/v1](ht
 
 ## Overview
 
-The study introduces a new method to generate high-resolution estimates of produced gas composition across the U.S., combining spatio-temporal kriging and a non-linear model based on oil and gas production data. The results improve methane loss rate estimates and enable more accurate emission inventories.
+The study introduces a new method to generate high-resolution estimates of produced gas composition across the U.S., combining spatio-temporal kriging and a non-linear model based on oil and gas production data. The results improve methane loss rate estimates and enable more accurate assessments of the climate change and human health impacts of leaks that happen along the oil and gas chain.
 
-## Main Features
+## Key points
 
 - Integration of data from:
   - USGS gas composition samples (1918–2014)
@@ -23,9 +23,7 @@ The study introduces a new method to generate high-resolution estimates of produ
 ## Repository Contents
 
 - `src/`: Core code and functions
-- `notebooks/`: Example notebooks and scripts
-- `data/`: Processed data (when available)
-- `output/`: Results and visualizations
+- `data/`: Raw data (publicly available)
 - `README.md`: Project overview
 
 ## Citation

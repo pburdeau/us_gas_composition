@@ -5,6 +5,7 @@ This repository contains the code and data processing pipeline used in the study
 **Burdeau, P.M., Sherwin, E.D., Biraud, S.C., Berman, E.S.F., Brandt, A.R.**  
 *High-resolution national mapping of natural gas composition redefines methane leakage impacts*  
 Preprint available at: [https://www.researchsquare.com/article/rs-6531662/v1](https://www.researchsquare.com/article/rs-6531662/v1)
+Online viewable and downloadable version of our gas composition estimates available at: [https://pburdeau.github.io/us_map_gas_composition/](https://pburdeau.github.io/us_map_gas_composition/)
 
 ## Overview
 

@@ -6,9 +6,6 @@ Semivariance/anisotropy workflow:
 - Bin by space/time for several alpha (space-time scaling) values.
 - Assemble an empirical variogram surface and estimate space–time anisotropy alpha
   by fitting a linear model on (near-)purely spatial lags and minimizing RMSE.
-
-Notes
-- Keep your original logic; only minimal, safe fixes added (see comments).
 """
 
 # =============== Imports & setup ===============

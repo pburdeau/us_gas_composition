@@ -10,11 +10,6 @@ STEPS
 4) Split merged files by BASIN_NAME.
 5) Concatenate basin-split chunks into one file per basin.
 
-Notes
-- CRS: Input header coordinates are WGS84 (EPSG:4326). Basins are reprojected to EPSG:26914 before spatial join.
-- Keys: Production has 'API/UWI' (string). Headers have 'API14' (string). We match left_on='API/UWI', right_on='API14'.
-- Filtration: rows with missing or zero API are dropped.
-- File naming: mirrors your original patterns so downstream steps remain compatible.
 """
 
 # Optional import per your environment preference (no-ops if module not present)

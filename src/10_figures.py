@@ -1,334 +1,350 @@
-import pandas as pd
-import numpy as np
-import os
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Publication-ready figures (bars, CDFs, heatmap, fractional loss bars).
+"""
 
-def process_ghgrp_processing_data(root_path):
+# =========================
+# Imports & Global Config
+# =========================
+import os
+import glob
+import pickle
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import geopandas as gpd
+import matplotlib.pyplot as plt
+
+from tqdm import tqdm
+from matplotlib.ticker import FuncFormatter, MultipleLocator
+
+# -----------------
+# Paths (config)
+# -----------------
+root_path = '/scratch/users/pburdeau/data/gas_composition'
+ghgrp_path = os.sep.join([root_path, 'ghgrp', 'ghgrp_v2.csv'])
+shapefiles_path = root_path + '/shapefiles'
+out_path = root_path + '/out'  # you reassign later in some flows if needed
+
+os.makedirs('figures_out', exist_ok=True)
+
+# Load base GHGRP file (used downstream)
+ghgrp = pd.read_csv(ghgrp_path)
+
+
+# ====================================================
+# GHGRP processing plants: weighted means + bootstrap
+# ====================================================
+def process_ghgrp_processing_data(root_path: str):
     """
-    Compute weighted average and bootstrap standard errors for CH4 and CO2 mole fractions
-    from GHGRP processing plant data, grouped by basin and year, and by basin overall.
+    Compute weighted average and bootstrap standard errors for CH4 and CO2
+    from GHGRP processing plant data by basin-year and basin-only.
+    Also compute the same by shale play (Haynesville) via spatial join.
+    Returns:
+        results_ghgrp_proc_by_basin (DataFrame),
+        ghgrp_processing_gdf (GeoDataFrame w/ C1/CO2 rescaled),
+        results_ghgrp_proc_by_shale (DataFrame)
     """
-    # Load data
+    # ---- Load data
     ghgrp_processing_gdf = pd.read_csv(os.path.join(root_path, 'ghgrp_processing_new_weighted_variable_gdf.csv'))
 
+    # ---- Helpers
     def weighted_average(group, value_column, weight_column):
-        weighted_sum = (group[value_column] * group[weight_column]).sum()
-        weight_sum = group[weight_column].sum()
-        return weighted_sum / weight_sum if weight_sum != 0 else np.nan
+        ws = (group[value_column] * group[weight_column]).sum()
+        w = group[weight_column].sum()
+        return ws / w if w != 0 else np.nan
 
     def bootstrap_se(df, value_column, weight_column, B=1000):
         bootstrap_means = []
         n = len(df)
         for _ in range(B):
             sample = df.sample(n, replace=True)
-            weighted_mean = weighted_average(sample, value_column, weight_column)
-            bootstrap_means.append(weighted_mean)
-        bootstrap_means = np.array(bootstrap_means)
-        bootstrap_mean = np.mean(bootstrap_means)
-        se_bootstrap = np.sqrt(np.sum((bootstrap_means - bootstrap_mean) ** 2) / (B - 1))
-        return se_bootstrap
+            bootstrap_means.append(weighted_average(sample, value_column, weight_column))
+        bootstrap_means = np.array(bootstrap_means, dtype=float)
+        m = np.nanmean(bootstrap_means)
+        return np.sqrt(np.nansum((bootstrap_means - m) ** 2) / max(B - 1, 1))
 
-    # Basin-Year Aggregation
-    weighted_results = ghgrp_processing_gdf.groupby(['BASIN_NAME', 'Year']).apply(
-        lambda group: pd.Series({
-            'C1': weighted_average(group, 'ch4_average_mole_fraction', 'Plant_Flow'),
-            'CO2': weighted_average(group, 'co2_average_mole_fraction', 'Plant_Flow'),
-        })
-    ).reset_index()
+    # ---- Basin-Year Aggregation
+    weighted_results = (
+        ghgrp_processing_gdf
+        .groupby(['BASIN_NAME', 'Year'])
+        .apply(lambda g: pd.Series({
+            'C1':  weighted_average(g, 'ch4_average_mole_fraction', 'Plant_Flow'),
+            'CO2': weighted_average(g, 'co2_average_mole_fraction', 'Plant_Flow'),
+        }))
+        .reset_index()
+    )
 
-    bootstrap_results = []
+    boots = []
     for _, row in weighted_results.iterrows():
         basin_name = row['BASIN_NAME']
         year = row['Year']
-        subset = ghgrp_processing_gdf[(ghgrp_processing_gdf['BASIN_NAME'] == basin_name) & (ghgrp_processing_gdf['Year'] == year)]
-        se_ch4 = bootstrap_se(subset, 'ch4_average_mole_fraction', 'Plant_Flow')
-        se_co2 = bootstrap_se(subset, 'co2_average_mole_fraction', 'Plant_Flow')
-        bootstrap_results.append({
+        subset = ghgrp_processing_gdf[(ghgrp_processing_gdf['BASIN_NAME'] == basin_name) &
+                                      (ghgrp_processing_gdf['Year'] == year)]
+        boots.append({
             'BASIN_NAME': basin_name,
             'Year': year,
-            'se_C1': se_ch4,
-            'se_CO2': se_co2
+            'se_C1': bootstrap_se(subset, 'ch4_average_mole_fraction', 'Plant_Flow'),
+            'se_CO2': bootstrap_se(subset, 'co2_average_mole_fraction', 'Plant_Flow'),
         })
-    bootstrap_df = pd.DataFrame(bootstrap_results)
-    results_ghgrp_proc_by_basin_year = pd.merge(weighted_results, bootstrap_df, on=['BASIN_NAME', 'Year'])
+    bootstrap_df = pd.DataFrame(boots)
+    results_ghgrp_proc_by_basin_year = pd.merge(weighted_results, bootstrap_df, on=['BASIN_NAME','Year'])
 
-    # Basin-only Aggregation
-    weighted_results_basin = ghgrp_processing_gdf.groupby('BASIN_NAME').apply(
-        lambda group: pd.Series({
-            'C1': weighted_average(group, 'ch4_average_mole_fraction', 'Plant_Flow'),
-            'CO2': weighted_average(group, 'co2_average_mole_fraction', 'Plant_Flow'),
-            'Gas': group['Plant_Flow'].sum(),
+    # ---- Basin-only Aggregation
+    weighted_results_basin = (
+        ghgrp_processing_gdf
+        .groupby('BASIN_NAME')
+        .apply(lambda g: pd.Series({
+            'C1':  weighted_average(g, 'ch4_average_mole_fraction', 'Plant_Flow'),
+            'CO2': weighted_average(g, 'co2_average_mole_fraction', 'Plant_Flow'),
+            'Gas': g['Plant_Flow'].sum(),
             'Year': 2017
-        })
-    ).reset_index()
+        }))
+        .reset_index()
+    )
 
-    bootstrap_results_basin = []
+    boots_basin = []
     for _, row in weighted_results_basin.iterrows():
         basin_name = row['BASIN_NAME']
         subset = ghgrp_processing_gdf[ghgrp_processing_gdf['BASIN_NAME'] == basin_name]
-        se_ch4 = bootstrap_se(subset, 'ch4_average_mole_fraction', 'Plant_Flow')
-        se_co2 = bootstrap_se(subset, 'co2_average_mole_fraction', 'Plant_Flow')
-        bootstrap_results_basin.append({
+        boots_basin.append({
             'BASIN_NAME': basin_name,
-            'se_C1': se_ch4,
-            'se_CO2': se_co2
+            'se_C1': bootstrap_se(subset, 'ch4_average_mole_fraction', 'Plant_Flow'),
+            'se_CO2': bootstrap_se(subset, 'co2_average_mole_fraction', 'Plant_Flow'),
         })
-    bootstrap_df_basin = pd.DataFrame(bootstrap_results_basin)
+    bootstrap_df_basin = pd.DataFrame(boots_basin)
     results_ghgrp_proc_by_basin = pd.merge(weighted_results_basin, bootstrap_df_basin, on='BASIN_NAME')
-    # process for future use
 
-    ghgrp_processing_gdf = ghgrp_processing_gdf.rename(columns={'Plant_Flow':'Gas', 'ch4_average_mole_fraction':'C1', 'co2_average_mole_fraction':'CO2'})
-    ghgrp_processing_gdf['C1'] /= 100
-    ghgrp_processing_gdf['CO2'] /= 100
+    # ---- Prepare for shale join
+    ghgrp_processing_gdf = ghgrp_processing_gdf.rename(columns={
+        'Plant_Flow':'Gas',
+        'ch4_average_mole_fraction':'C1',
+        'co2_average_mole_fraction':'CO2'
+    })
+    ghgrp_processing_gdf['C1']  = ghgrp_processing_gdf['C1']  / 100.0
+    ghgrp_processing_gdf['CO2'] = ghgrp_processing_gdf['CO2'] / 100.0
+    ghgrp_processing_gdf = ghgrp_processing_gdf[['Gas','C1','CO2','BASIN_NAME','latitude','longitude','Count','Year']]
 
-    ghgrp_processing_gdf = ghgrp_processing_gdf[['Gas',
-       'C1', 'CO2', 'BASIN_NAME', 'latitude', 'longitude', 'Count', 'Year']]
-    # Add shales
-    
-    shales_gdf = gpd.read_file(shapefiles_path + '/shale_plays')
-    haynesville_shale_gdf = shales_gdf[shales_gdf.Shale_play == 'Haynesville-Bossier']
-    ghgrp_processing_gdf = gpd.GeoDataFrame(
-        ghgrp_processing_gdf, 
-        geometry=gpd.points_from_xy(ghgrp_processing_gdf.longitude, ghgrp_processing_gdf.latitude)
-    )
-    ghgrp_processing_gdf = ghgrp_processing_gdf.set_crs("EPSG:4326", allow_override=True)  # assuming original CRS is EPSG:4326
-    
-    ghgrp_processing_gdf = ghgrp_processing_gdf.to_crs(epsg=26914)
-    
-    # Convert shales_gdf from EPSG:3857 (Web Mercator) to EPSG:26914 (UTM Zone 14N)
+    # ---- Shale plays: build Haynesville subset
+    # Load shales and select Haynesville-Bossier
+    shales_gdf = gpd.read_file(os.path.join(shapefiles_path, 'shale_plays'))
+    haynesville_shale_gdf = shales_gdf[shales_gdf.Shale_play == 'Haynesville-Bossier'].copy()
+
+    # Points GeoDataFrame setup
+    ghgrp_processing_gdf_geo = gpd.GeoDataFrame(
+        ghgrp_processing_gdf,
+        geometry=gpd.points_from_xy(ghgrp_processing_gdf.longitude, ghgrp_processing_gdf.latitude),
+        crs="EPSG:4326"
+    ).to_crs(epsg=26914)
+
     haynesville_shale_gdf = haynesville_shale_gdf.to_crs(epsg=26914)
-    
-    # Step 4: Perform the spatial join (check if points are within polygons)
-    ghgrp_processing_joined_shales_gdf = gpd.sjoin(ghgrp_processing_gdf, haynesville_shale_gdf, how="inner", predicate="within")
 
-    
-    # Step 1: Group by BASIN_NAME and Year and compute weighted averages
-    weighted_results = ghgrp_processing_joined_shales_gdf.groupby(['Shale_play', 'Year']).apply(
-        lambda group: pd.Series({
-            'C1': weighted_average(group, 'C1', 'Gas'),
-            'CO2': weighted_average(group, 'CO2', 'Gas'),
-        })
-    ).reset_index()
-    
-    # Step 2: Compute bootstrap standard error for each group
-    bootstrap_results = []
-    for _, row in weighted_results.iterrows():
-        basin_name = row['Shale_play']
-        year = row['Year']
-        
-        # Filter the original dataframe for the current basin and year
-        subset = ghgrp_processing_joined_shales_gdf[(ghgrp_processing_joined_shales_gdf['Shale_play'] == basin_name) & (ghgrp_processing_joined_shales_gdf['Year'] == year)]
-        
-        # Bootstrap standard error for CH4
-        se_ch4 = bootstrap_se(subset, 'C1', 'Gas')
-        # Bootstrap standard error for CO2
-        se_co2 = bootstrap_se(subset, 'CO2', 'Gas')
-        
-        bootstrap_results.append({
-            'Shale_play': basin_name,
+    ghgrp_processing_joined_shales_gdf = gpd.sjoin(
+        ghgrp_processing_gdf_geo, haynesville_shale_gdf, how="inner", predicate="within"
+    )
+
+    # Shale-year weighted
+    weighted_results_shale_year = (
+        ghgrp_processing_joined_shales_gdf
+        .groupby(['Shale_play','Year'])
+        .apply(lambda g: pd.Series({
+            'C1':  weighted_average(g, 'C1', 'Gas'),
+            'CO2': weighted_average(g, 'CO2', 'Gas'),
+        }))
+        .reset_index()
+    )
+
+    boots_shale_year = []
+    for _, row in weighted_results_shale_year.iterrows():
+        shale = row['Shale_play']; year = row['Year']
+        subset = ghgrp_processing_joined_shales_gdf[
+            (ghgrp_processing_joined_shales_gdf['Shale_play'] == shale) &
+            (ghgrp_processing_joined_shales_gdf['Year'] == year)
+        ]
+        boots_shale_year.append({
+            'Shale_play': shale,
             'Year': year,
-            'se_C1': se_ch4,
-            'se_CO2': se_co2
+            'se_C1': bootstrap_se(subset, 'C1', 'Gas'),
+            'se_CO2': bootstrap_se(subset, 'CO2', 'Gas'),
         })
-    
-    # Convert bootstrap results to a DataFrame
-    bootstrap_df = pd.DataFrame(bootstrap_results)
-    
-    # Merge weighted results with bootstrap uncertainties
-    results_ghgrp_proc_by_shale_year = pd.merge(weighted_results, bootstrap_df, on=['Shale_play', 'Year'])
-    
-    # Step 1: Group by BASIN_NAME and compute weighted averages
-    
-    weighted_results_shale = ghgrp_processing_joined_shales_gdf.groupby('Shale_play').apply(
-        lambda group: pd.Series({
-            'C1': weighted_average(group, 'C1', 'Gas'),
-            'CO2': weighted_average(group, 'CO2', 'Gas'),
-            'Gas': group['Gas'].sum(),  # total flow
-            'Year': 2017  # constant value
-        })
-    ).reset_index()
-    
-    # Step 2: Compute bootstrap standard error for each basin
-    bootstrap_results_shale = []
-    for _, row in weighted_results_shale.iterrows():
-        basin_name = row['Shale_play']
-        
-        # Filter the original dataframe for the current basin
-        subset = ghgrp_processing_joined_shales_gdf[ghgrp_processing_joined_shales_gdf['Shale_play'] == basin_name]
-        
-        # Bootstrap standard error for CH4
-        se_ch4 = bootstrap_se(subset, 'C1', 'Gas')
-        # Bootstrap standard error for CO2
-        se_co2 = bootstrap_se(subset, 'CO2', 'Gas')
-        
-        bootstrap_results_shale.append({
-            'Shale_play': basin_name,
-            'se_C1': se_ch4,
-            'se_CO2': se_co2
-        })
-    
-    # Convert bootstrap results to a DataFrame
-    bootstrap_df_shale = pd.DataFrame(bootstrap_results_shale)
-    
-    # Merge weighted results with bootstrap uncertainties
-    results_ghgrp_proc_by_shale = pd.merge(weighted_results_shale, bootstrap_df_shale, on='Shale_play')
+    bootstrap_df_shale_year = pd.DataFrame(boots_shale_year)
+    results_ghgrp_proc_by_shale_year = pd.merge(
+        weighted_results_shale_year, bootstrap_df_shale_year,
+        on=['Shale_play','Year']
+    )
 
-    results_ghgrp_proc_by_shale['C1'] *= 100
-    results_ghgrp_proc_by_shale['CO2'] *= 100
+    # Shale-only weighted
+    weighted_results_shale = (
+        ghgrp_processing_joined_shales_gdf
+        .groupby('Shale_play')
+        .apply(lambda g: pd.Series({
+            'C1':  weighted_average(g, 'C1', 'Gas'),
+            'CO2': weighted_average(g, 'CO2', 'Gas'),
+            'Gas': g['Gas'].sum(),
+            'Year': 2017
+        }))
+        .reset_index()
+    )
+
+    boots_shale = []
+    for _, row in weighted_results_shale.iterrows():
+        shale = row['Shale_play']
+        subset = ghgrp_processing_joined_shales_gdf[ghgrp_processing_joined_shales_gdf['Shale_play'] == shale]
+        boots_shale.append({
+            'Shale_play': shale,
+            'se_C1': bootstrap_se(subset, 'C1', 'Gas'),
+            'se_CO2': bootstrap_se(subset, 'CO2', 'Gas'),
+        })
+    bootstrap_df_shale = pd.DataFrame(boots_shale)
+    results_ghgrp_proc_by_shale = pd.merge(
+        weighted_results_shale, bootstrap_df_shale, on='Shale_play'
+    )
+
+    # Convert to %
+    results_ghgrp_proc_by_shale['C1']  *= 100.0
+    results_ghgrp_proc_by_shale['CO2'] *= 100.0
+
     return results_ghgrp_proc_by_basin, ghgrp_processing_gdf, results_ghgrp_proc_by_shale
 
+
+# Run processing aggregation once (returns multiple outputs)
 results_ghgrp_proc_by_basin, ghgrp_processing_gdf, results_ghgrp_proc_by_shale = process_ghgrp_processing_data(root_path)
 
-def propagate_uncertainties_normalization(data_on_grid):
-    components = ['HE', 'CO2', 'H2', 'N2', 'H2S', 'AR', 'O2', 'C1', 'C2', 'C3', 'N-C4', 'I-C4', 'N-C5', 'I-C5', 'C6+']
 
-    # Generate list of standard deviation columns for each component
-    list_stds = ['std_' + comp for comp in components]
+# ==================================================
+# Normalization uncertainty propagation (two forms)
+# ==================================================
+def propagate_uncertainties_normalization(data_on_grid: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize all components to sum to 1 (fraction), propagate uncertainties,
+    and add a sum check. (Outputs remain in fraction unless scaled later.)
+    """
+    components = ['HE','CO2','H2','N2','H2S','AR','O2','C1','C2','C3','N-C4','I-C4','N-C5','I-C5','C6+']
+    list_stds  = [f'std_{c}' for c in components]
 
-    # Extract values and their uncertainties
-    values = data_on_grid[components].values
-    uncertainties = data_on_grid[list_stds].values
+    vals = data_on_grid[components].to_numpy(dtype=float)
+    sigs = data_on_grid[list_stds].to_numpy(dtype=float)
 
-    # Step 1: Calculate the Sum and its Uncertainty
-    sum_values = np.nansum(values, axis=1)
-    uncertainty_sum = np.sqrt(np.nansum(uncertainties**2, axis=1))
+    sum_vals = np.nansum(vals, axis=1)
+    sum_vals_safe = np.where(sum_vals == 0, np.nan, sum_vals)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        norm = vals / sum_vals_safe[:, None]
 
-    # Step 2: Normalize the Values to sum to 100 and add to DataFrame
+    # fractional uncertainty on normalized values
+    vals_safe = np.where(vals == 0, np.nan, vals)
+    frac_unc = np.sqrt((sigs / vals_safe)**2 + (np.nansum(sigs**2, axis=1)[:, None] / (sum_vals_safe[:, None]**2)))
+
+    # absolute uncertainty for normalized values
+    abs_unc = frac_unc * norm / sum_vals_safe[:, None]  # consistent with your pattern
+
     for i, comp in enumerate(components):
-        data_on_grid[comp] = values[:, i] / sum_values
+        data_on_grid[comp] = norm[:, i]
+        data_on_grid[f'std_{comp}'] = abs_unc[:, i]
 
-    # Step 3: Calculate the Fractional Uncertainty of Each Normalized Value
-    for i, comp in enumerate(components):
-        fractional_uncertainty = np.sqrt((uncertainties[:, i] / values[:, i])**2 + (uncertainty_sum / sum_values)**2)
-        data_on_grid['std_' + comp] = fractional_uncertainty
-
-    # Step 4: Calculate the Final Absolute Uncertainty for normalized values and add to DataFrame
-    for i, comp in enumerate(components):
-        absolute_uncertainty =  data_on_grid['std_' + comp] * data_on_grid[comp] / sum_values
-        data_on_grid['std_' + comp] = absolute_uncertainty
-
-    # Step 5: Add a column to check if the sum of the normalized values is 100
     data_on_grid['sum_check'] = data_on_grid[components].sum(axis=1).round(2)
-
     return data_on_grid
 
 
-def propagate_uncertainties_normalization_mean(data_on_grid):
-    components = ['C1', 'C2', 'HE', 'CO2', 'H2', 'N2', 'H2S', 'AR', 'O2', 'C3', 'N-C4', 'I-C4', 'N-C5', 'I-C5', 'C6+']
-    mean_components = [f"{comp}_mean" for comp in components]
+def propagate_uncertainties_normalization_mean(data_on_grid: pd.DataFrame) -> pd.DataFrame:
+    """
+    Same as above but for *_mean columns (C1_mean, etc.), writing back to the same columns.
+    """
+    components = ['C1','C2','HE','CO2','H2','N2','H2S','AR','O2','C3','N-C4','I-C4','N-C5','I-C5','C6+']
+    mean_cols = [f'{c}_mean' for c in components]
+    list_stds = [f'std_{c}_mean' for c in components]
 
+    vals = data_on_grid[mean_cols].to_numpy(dtype=float)
+    sigs = data_on_grid[list_stds].to_numpy(dtype=float)
 
-    # Generate list of standard deviation columns for each component
-    list_stds = ['std_' + comp for comp in mean_components]
+    sum_vals = np.nansum(vals, axis=1)
+    sum_vals_safe = np.where(sum_vals == 0, np.nan, sum_vals)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        norm = vals / sum_vals_safe[:, None]
 
-    # Extract values and their uncertainties
-    values = data_on_grid[mean_components].values
-    uncertainties = data_on_grid[list_stds].values
+    vals_safe = np.where(vals == 0, np.nan, vals)
+    frac_unc = np.sqrt((sigs / vals_safe)**2 + (np.nansum(sigs**2, axis=1)[:, None] / (sum_vals_safe[:, None]**2)))
+    abs_unc = frac_unc * norm / sum_vals_safe[:, None]
 
-    # Step 1: Calculate the Sum and its Uncertainty
-    sum_values = np.nansum(values, axis=1)
-    uncertainty_sum = np.sqrt(np.nansum(uncertainties**2, axis=1))
+    for i, col in enumerate(mean_cols):
+        data_on_grid[col] = norm[:, i]
+        data_on_grid[f'std_{col}'] = abs_unc[:, i]
 
-    # Step 2: Normalize the Values to sum to 100 and add to DataFrame
-    for i, comp in enumerate(mean_components):
-        data_on_grid[comp] = values[:, i] / sum_values
-
-    # Step 3: Calculate the Fractional Uncertainty of Each Normalized Value
-    for i, comp in enumerate(mean_components):
-        fractional_uncertainty = np.sqrt((uncertainties[:, i] / values[:, i])**2 + (uncertainty_sum / sum_values)**2)
-        data_on_grid['std_' + comp] = fractional_uncertainty
-
-    # Step 4: Calculate the Final Absolute Uncertainty for normalized values and add to DataFrame
-    for i, comp in enumerate(mean_components):
-        absolute_uncertainty =  data_on_grid['std_' + comp] * data_on_grid[comp] / sum_values
-        data_on_grid['std_' + comp] = absolute_uncertainty
-
-    # Step 5: Add a column to check if the sum of the normalized values is 100
-#     data_on_grid['sum_check_mean'] = data_on_grid[components].sum(axis=1).round(2)
-
+    # no explicit sum_check_mean; can add if desired
     return data_on_grid
 
 
+# =========================================
+# Shared helpers (predic_beta + filtering)
+# =========================================
 def predic_beta(pred1, pred_1_std, pred2, beta):
-    weight_krig = 1
-    weight_pred = beta * (pred_1_std ** 2)
-    sum_weights = weight_krig + weight_pred
-    prediction = (pred1 + weight_pred * pred2) / sum_weights
-    return prediction
+    w_krig = 1.0
+    w_pred = beta * (pred_1_std ** 2)
+    return (pred1 + w_pred * pred2) / (w_krig + w_pred)
 
-def filter_non_hydrocarbons(df, threshold):
-    non_hydrocarbons = ['HE', 'CO2', 'H2', 'N2', 'H2S', 'AR', 'O2']
-    df['non_hydrocarbon_sum'] = df[non_hydrocarbons].fillna(0).sum(axis=1)
-    filtered_df = df[df['non_hydrocarbon_sum'] < threshold]
-    filtered_df = filtered_df.drop(columns=['non_hydrocarbon_sum'])
-    return filtered_df
+
+def filter_non_hydrocarbons(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    non_hc = ['HE','CO2','H2','N2','H2S','AR','O2']
+    df['non_hydrocarbon_sum'] = df[non_hc].fillna(0).sum(axis=1)
+    out = df[df['non_hydrocarbon_sum'] < threshold].drop(columns=['non_hydrocarbon_sum'])
+    return out
+
 
 def calculate_weighted_mean(group, value_column, weight_column):
-    weighted_sum = (group[value_column] * group[weight_column]).sum()
-    weight_sum = group[weight_column].sum()
-    return weighted_sum / weight_sum if weight_sum != 0 else np.nan
+    ws = (group[value_column] * group[weight_column]).sum()
+    w = group[weight_column].sum()
+    return ws / w if w != 0 else np.nan
 
 
 def compute_weighted_mean_by_year(df_list, value_column, weight_column, basin_column, year_column):
+    """
+    For each DataFrame in df_list, compute weighted means (value_column by weight_column)
+    grouped by (basin_column, year_column) and also keep (Oil, Gas) sums.
+    Returns dict: {(basin, year): [ {weighted_mean, Oil, Gas}, ... ]}
+    """
     basin_year_data_dict = {}
-    
     for df in df_list:
-        # Compute weighted mean
         weighted_means = (
             df.groupby([basin_column, year_column])
-            .apply(lambda group: calculate_weighted_mean(group, value_column, weight_column))
-            .reset_index(name='weighted_mean')
+              .apply(lambda g: calculate_weighted_mean(g, value_column, weight_column))
+              .reset_index(name='weighted_mean')
         )
-        
-        # Compute total Oil and Gas
         oil_gas_sums = (
-            df.groupby([basin_column, year_column])[['Oil', 'Gas']].sum().reset_index()
+            df.groupby([basin_column, year_column])[['Oil','Gas']].sum().reset_index()
         )
-
-        # Merge both results
         merged = weighted_means.merge(oil_gas_sums, on=[basin_column, year_column])
-
-        # Populate final dictionary
         for _, row in merged.iterrows():
             key = (row[basin_column], row[year_column])
-            if key not in basin_year_data_dict:
-                basin_year_data_dict[key] = []
-            basin_year_data_dict[key].append({
+            basin_year_data_dict.setdefault(key, []).append({
                 'weighted_mean': row['weighted_mean'],
                 'Oil': row['Oil'],
                 'Gas': row['Gas']
             })
-
     return basin_year_data_dict
 
-def compute_combined_results(basin_year_means, component_name):
-    results = []
-    
-    for basin in set(b for b, _ in basin_year_means.keys()):
-        year_data = {year: basin_year_means[(basin, year)] 
-                     for b, year in basin_year_means.keys() if b == basin}
-        
-#         closest_years = sorted([y for y in year_data.keys() if y >= 2010], reverse=True)
-        
-        closest_years = sorted(year_data.keys())
 
-        for year in closest_years:
-            entries = year_data[year]  # List of dicts: each has weighted_mean, Oil, Gas
-            
+def compute_combined_results(basin_year_means, component_name):
+    """
+    Average across SGS runs: mean of the SGS-specific weighted means (and SE),
+    plus average Oil/Gas (per your original pattern).
+    """
+    results = []
+    for basin in set(b for b, _ in basin_year_means.keys()):
+        year_data = {y: basin_year_means[(basin, y)]
+                     for b, y in basin_year_means.keys() if b == basin}
+        years = sorted(year_data.keys())
+        for year in years:
+            entries = year_data[year]
             if entries:
                 means = [e['weighted_mean'] for e in entries]
-                oils = [e['Oil'] for e in entries]
+                oils  = [e['Oil'] for e in entries]
                 gases = [e['Gas'] for e in entries]
-
-                mean_value = np.mean(means)
-                std_error = np.std(means, ddof=1) / np.sqrt(len(means))
-                total_oil = np.mean(oils)
-                total_gas = np.mean(gases)
+                mean_value = float(np.nanmean(means))
+                std_error  = float(np.nanstd(means, ddof=1) / np.sqrt(max(len(means), 1)))
+                total_oil  = float(np.nanmean(oils))
+                total_gas  = float(np.nanmean(gases))
             else:
-                mean_value = np.nan
-                std_error = np.nan
-                total_oil = np.nan
-                total_gas = np.nan
-
+                mean_value = std_error = total_oil = total_gas = np.nan
             results.append({
                 'BASIN_NAME': basin,
                 'Year': year,
@@ -337,199 +353,162 @@ def compute_combined_results(basin_year_means, component_name):
                 'Oil': total_oil,
                 'Gas': total_gas
             })
-    
     return pd.DataFrame(results)
 
 
-def upload_result_simple(path):
+def upload_result_simple(path: str) -> pd.DataFrame:
+    """Load and concat results matching a glob under out/; rescale (X,Y) as in your flow."""
     csv_files_pattern = os.path.join(root_path, 'out', path)
     csv_files = glob.glob(csv_files_pattern)
-    result_all_list = [pd.read_csv(file) for file in csv_files]
-    result_all = pd.concat(result_all_list)
+    result_all_list = [pd.read_csv(f) for f in csv_files]
+    result_all = pd.concat(result_all_list, ignore_index=True)
 
     result_all['X'] = (result_all['X'] * 6.34).round(1)
     result_all['Y'] = (result_all['Y'] * 6.34).round(1)
     return result_all
 
-def return_results_df_usgs_combined(result_dic, a, b, threshold, keep_nanapis, radius_factor, propagate, C2_predicted=False):
+
+# ==========================================================
+# USGS combined results (across SGS), with optional C2 pred
+# ==========================================================
+def return_results_df_usgs_combined(result_dic, a, b, threshold, keep_nanapis, radius_factor,
+                                    propagate, C2_predicted=False):
     all_prod_indices_all = pd.read_csv(f'all_prod_indices_all_{threshold}.csv')
     all_prod_indices_all['X'] = (all_prod_indices_all['X']).round(1)
     all_prod_indices_all['Y'] = (all_prod_indices_all['Y']).round(1)
-
     all_prod_indices_all['Prod_X_grid'] = all_prod_indices_all['Prod_X_grid'].round(1)
     all_prod_indices_all['Prod_Y_grid'] = all_prod_indices_all['Prod_Y_grid'].round(1)
-    
+
     print('Created all_prod_indices_all...')
     data_source = 'usgs'
     sample = 2
     radius_factor = 0.175
-    result_usgs = result_dic[(threshold, a, b)]
+
+    result_usgs = result_dic[(threshold, a, b)].copy()
     result_usgs['X'] = (result_usgs['X']).round(1)
     result_usgs['Y'] = (result_usgs['Y']).round(1)
     print('Loaded results...')
-    components = ['HE', 'CO2', 'H2', 'N2', 'H2S', 'AR', 'O2', 'C1', 'C2', 'C3', 'N-C4', 'I-C4', 'N-C5', 'I-C5', 'C6+']
 
+    components = ['HE','CO2','H2','N2','H2S','AR','O2','C1','C2','C3','N-C4','I-C4','N-C5','I-C5','C6+']
     rename_mean = {comp: f"{comp}_mean" for comp in components}
-    rename_std = {f"std_{comp}": f"std_{comp}_mean" for comp in components}
+    rename_std  = {f"std_{comp}": f"std_{comp}_mean" for comp in components}
+    result_usgs.rename(columns={**rename_mean, **rename_std}, inplace=True)
 
-    result_usgs = result_usgs.rename(columns={**rename_mean, **rename_std})
-
-
+    # Collect SGS runs
     list_result_all_sgs = []
     for i in range(1, 6):
-        a = 2
-        b = 2
-        interp_method = 'sgs_' + str(i)
-        'Uploading sgs...'
+        a_sgs = 2; b_sgs = 2
+        interp_method = f'sgs_{i}'
+        print('Uploading sgs...')
         result_all_sgs = upload_result_simple(
-                                   f'result_data_source_{data_source}_a_{a}_b_{b}_basin_*_sample_{sample}_interp_{interp_method}_keep_nanapis_{keep_nanapis}_threshold_{threshold}_radius_factor_{radius_factor}.csv')
+            f'result_data_source_{data_source}_a_{a_sgs}_b_{b_sgs}_basin_*_sample_{sample}_interp_{interp_method}_keep_nanapis_{keep_nanapis}_threshold_{threshold}_radius_factor_{radius_factor}.csv'
+        )
+
         if C2_predicted:
-            result_all_sgs = result_all_sgs.drop(columns=['std_C1', 'std_C2'])
+            result_all_sgs.drop(columns=['std_C1','std_C2'], errors='ignore', inplace=True)
 
             print('Merging sgs...')
-            
-            base_cols = ['X', 'Y', 'T', 'C1_predic_gor', 'C2_predic_gor', 'beta_C1', 'beta_C2']
-            std_cols = [f"std_{comp}_mean" for comp in components]
-            mean_cols = [f"{comp}_mean" for comp in components]
-                        
-            subset = result_usgs[base_cols + mean_cols + std_cols]
+            base_cols = ['X','Y','T','C1_predic_gor','C2_predic_gor','beta_C1','beta_C2']
+            std_cols  = [f"std_{c}_mean" for c in components]
+            mean_cols = [f"{c}_mean" for c in components]
 
-            result_all_sgs = pd.merge(result_all_sgs,
-                                      subset,
-                                     on=['X','Y','T'])
+            subset = result_usgs[base_cols + mean_cols + std_cols]
+            result_all_sgs = pd.merge(result_all_sgs, subset, on=['X','Y','T'])
             result_all_sgs = result_all_sgs[~pd.isna(result_all_sgs['C1_predic_gor'])]
             print('Adding predictions...')
             result_all_sgs['std_C1'] = result_all_sgs['std_C1_mean']
             result_all_sgs['std_C2'] = result_all_sgs['std_C2_mean']
 
-            result_all_sgs['C1'] = predic_beta(result_all_sgs['C1'], result_all_sgs['std_C1'], result_all_sgs['C1_predic_gor'], result_all_sgs['beta_C1'].iloc[0])
-            
-#             result_all_sgs['C1_mean'] = predic_beta(result_all_sgs['C1_mean'], result_all_sgs['std_C1'], result_all_sgs['C1_predic_gor'], result_all_sgs['beta_C1'].iloc[0])
-
-            result_all_sgs['C2'] = predic_beta(result_all_sgs['C2'], result_all_sgs['std_C2'], result_all_sgs['C2_predic_gor'], result_all_sgs['beta_C2'].iloc[0])
-#             result_all_sgs['C2_mean'] = predic_beta(result_all_sgs['C2_mean'], result_all_sgs['std_C2'], result_all_sgs['C2_predic_gor'], result_all_sgs['beta_C2'].iloc[0])
+            result_all_sgs['C1'] = predic_beta(result_all_sgs['C1'], result_all_sgs['std_C1'],
+                                               result_all_sgs['C1_predic_gor'], result_all_sgs['beta_C1'].iloc[0])
+            result_all_sgs['C2'] = predic_beta(result_all_sgs['C2'], result_all_sgs['std_C2'],
+                                               result_all_sgs['C2_predic_gor'], result_all_sgs['beta_C2'].iloc[0])
 
         list_result_all_sgs.append(result_all_sgs)
 
+    # Propagate & add Year
     new_list_result_all_sgs = []
     for result_all_sgs in list_result_all_sgs:
         print('Propagating uncertainties...')
         if propagate:
-
             result_all_sgs = propagate_uncertainties_normalization_mean(result_all_sgs)
             result_all_sgs = propagate_uncertainties_normalization(result_all_sgs)
+
         reference_date = '1918-08-19T00:00:00.000000000'
         result_all_sgs['Year'] = (pd.Timestamp(reference_date) + pd.to_timedelta(result_all_sgs['T'], unit='D')).dt.year
 
-
         new_list_result_all_sgs.append(result_all_sgs)
 
+    # Combine across SGS
     all_results = []
-    mean_cols = [f"{comp}_mean" for comp in components]
+    mean_cols = [f"{c}_mean" for c in components]
     for component in components + mean_cols:
-  
-        # compute weighted mean by year and component
-        basin_year_means = compute_weighted_mean_by_year(
-            new_list_result_all_sgs, value_column=component, weight_column='Gas', 
-            basin_column='BASIN_NAME', year_column='Year'
-        )
-        component_results = compute_combined_results(basin_year_means, component)
-        all_results.append(component_results)
+        by = compute_weighted_mean_by_year(new_list_result_all_sgs, component, 'Gas',
+                                           'BASIN_NAME', 'Year')
+        comp_df = compute_combined_results(by, component)
+        all_results.append(comp_df)
 
-    # Merge results for all components into a single DataFrame
-    results_df_usgs_combined = all_results[0]
-    for component_results in all_results[1:]:
-        results_df_usgs_combined = results_df_usgs_combined.merge(
-            component_results, 
-            on=['BASIN_NAME', 'Year'], 
-            how='outer', 
-            suffixes=('', '_dup')
-        )
-        # Remove duplicate suffix columns for Gas and Oil
-        if 'Gas_dup' in results_df_usgs_combined.columns:
-            results_df_usgs_combined['Gas'] = results_df_usgs_combined[['Gas', 'Gas_dup']].sum(axis=1, skipna=True)
-            results_df_usgs_combined.drop(columns=['Gas_dup'], inplace=True)
-        if 'Oil_dup' in results_df_usgs_combined.columns:
-            results_df_usgs_combined['Oil'] = results_df_usgs_combined[['Oil', 'Oil_dup']].sum(axis=1, skipna=True)
-            results_df_usgs_combined.drop(columns=['Oil_dup'], inplace=True)
+    # Merge all components into single DF
+    results_df = all_results[0]
+    for comp_df in all_results[1:]:
+        results_df = results_df.merge(comp_df, on=['BASIN_NAME','Year'], how='outer', suffixes=('', '_dup'))
+        if 'Gas_dup' in results_df.columns:
+            results_df['Gas'] = results_df[['Gas','Gas_dup']].sum(axis=1, skipna=True)
+            results_df.drop(columns=['Gas_dup'], inplace=True)
+        if 'Oil_dup' in results_df.columns:
+            results_df['Oil'] = results_df[['Oil','Oil_dup']].sum(axis=1, skipna=True)
+            results_df.drop(columns=['Oil_dup'], inplace=True)
 
-    return results_df_usgs_combined
-
-# save average results by year by basin for figures for usgs
-radius_factor = 0.175
-C2_predicted = True
-data_source = "usgs" 
-filename = f"result_dic_r0175_{data_source}.pkl"
-
-with open(filename, "rb") as f:
-    result_dic = pickle.load(f)
-    
-
-# Initialize the dictionary with tqdm for progress monitoring
-results_df_usgs_combined_dict = {}
-for (a, b) in tqdm(zip([-1, 1, -1, 1], [-1, 1, 1, -1]), desc="Pairs of (a, b)", total=4, position=0):
-    for threshold in tqdm([1000, 10, 25, 50], desc="Threshold", position=1, leave=False):
-        for keep_nanapis in tqdm([True], desc="Keep NaNs", position=2, leave=False):
-            for propagate in tqdm([True], desc="Propagate", position=3, leave=False):
-                results_df_usgs_combined_dict[(a, b, threshold, keep_nanapis, propagate)] = return_results_df_usgs_combined(
-                   result_dic, a, b, threshold, keep_nanapis, radius_factor, propagate, C2_predicted
-                )
-with open("results_df_usgs_combined_dict_C2_predicted.pkl", "wb") as f:
-    pickle.dump(results_df_usgs_combined_dict, f)
+    return results_df
 
 
+# =========================================
+# GHGRP combined results (across SGS runs)
+# =========================================
 def return_results_df_ghgrp_combined(result_dic, a, b, threshold, keep_nanapis, radius_factor):
     all_prod_indices_all = pd.read_csv(f'all_prod_indices_all_ghgrp.csv')
     all_prod_indices_all['X'] = (all_prod_indices_all['X']).round(1)
     all_prod_indices_all['Y'] = (all_prod_indices_all['Y']).round(1)
-
     all_prod_indices_all['Prod_X_grid'] = all_prod_indices_all['Prod_X_grid'].round(1)
     all_prod_indices_all['Prod_Y_grid'] = all_prod_indices_all['Prod_Y_grid'].round(1)
-    
+
     print('Created all_prod_indices_all...')
     data_source = 'ghgrp'
     sample = 2
     radius_factor = 0.15
-    result_ghgrp = result_dic[(threshold, a, b)]
+
+    result_ghgrp = result_dic[(threshold, a, b)].copy()
     result_ghgrp['X'] = (result_ghgrp['X']).round(1)
     result_ghgrp['Y'] = (result_ghgrp['Y']).round(1)
     print('Loaded results...')
-    components = ['CO2', 'C1']
+    components = ['CO2','C1']
 
-    rename_mean = {comp: f"{comp}_mean" for comp in components}
-    rename_std = {f"std_{comp}": f"std_{comp}_mean" for comp in components}
+    rename_mean = {c: f"{c}_mean" for c in components}
+    rename_std  = {f"std_{c}": f"std_{c}_mean" for c in components}
+    result_ghgrp.rename(columns={**rename_mean, **rename_std}, inplace=True)
 
-    result_ghgrp = result_ghgrp.rename(columns={**rename_mean, **rename_std})    
-    
-    
     list_result_all_sgs = []
     for i in range(1, 4):
-        a = 2
-        b = 2
-        interp_method = 'sgs_' + str(i)
-        'Uploading sgs...'
+        a_sgs = 2; b_sgs = 2
+        interp_method = f'sgs_{i}'
+        print('Uploading sgs...')
         result_all_sgs = upload_result_simple(
-                                   f'result_data_source_{data_source}_a_{a}_b_{b}_basin_*_sample_{sample}_interp_{interp_method}_keep_nanapis_{keep_nanapis}_threshold_{threshold}_radius_factor_{radius_factor}.csv')
+            f'result_data_source_{data_source}_a_{a_sgs}_b_{b_sgs}_basin_*_sample_{sample}_interp_{interp_method}_keep_nanapis_{keep_nanapis}_threshold_{threshold}_radius_factor_{radius_factor}.csv'
+        )
+        result_all_sgs.drop(columns=['std_C1'], errors='ignore', inplace=True)
 
-        result_all_sgs = result_all_sgs.drop(columns=['std_C1'])
-        
-        
-        base_cols = ['X', 'Y', 'T', 'C1_predic_gor', 'beta_C1']
-        std_cols = [f"std_{comp}_mean" for comp in components]
-        mean_cols = [f"{comp}_mean" for comp in components]
-
+        base_cols = ['X','Y','T','C1_predic_gor','beta_C1']
+        std_cols  = [f"std_{c}_mean" for c in components]
+        mean_cols = [f"{c}_mean" for c in components]
         subset = result_ghgrp[base_cols + mean_cols + std_cols]
 
-        result_all_sgs = pd.merge(result_all_sgs,
-                                  subset,
-                                 on=['X','Y','T'])
+        result_all_sgs = pd.merge(result_all_sgs, subset, on=['X','Y','T'])
         result_all_sgs = result_all_sgs[~pd.isna(result_all_sgs['C1_predic_gor'])]
+
         print('Adding predictions...')
         result_all_sgs['std_C1'] = result_all_sgs['std_C1_mean']
-        
-        result_all_sgs = result_all_sgs[~pd.isna(result_all_sgs['C1_predic_gor'])]
-        result_all_sgs['C1'] = predic_beta(result_all_sgs['C1'], result_all_sgs['std_C1'], result_all_sgs['C1_predic_gor'], result_all_sgs['beta_C1'].iloc[0])
-#         result_all_sgs['C1_mean'] = predic_beta(result_all_sgs['C1_mean'], result_all_sgs['std_C1'], result_all_sgs['C1_predic_gor'], result_all_sgs['beta_C1'].iloc[0])
+        result_all_sgs['C1'] = predic_beta(result_all_sgs['C1'], result_all_sgs['std_C1'],
+                                           result_all_sgs['C1_predic_gor'], result_all_sgs['beta_C1'].iloc[0])
 
         reference_date = '1918-08-19T00:00:00.000000000'
         result_all_sgs['Year'] = (pd.Timestamp(reference_date) + pd.to_timedelta(result_all_sgs['T'], unit='D')).dt.year
@@ -538,91 +517,50 @@ def return_results_df_ghgrp_combined(result_dic, a, b, threshold, keep_nanapis, 
 
     new_list_result_all_sgs = list_result_all_sgs
 
+    # Combine across SGS
     all_results = []
-    mean_cols = [f"{comp}_mean" for comp in components]
-
+    mean_cols = [f"{c}_mean" for c in components]
     for component in components + mean_cols:
+        by = compute_weighted_mean_by_year(new_list_result_all_sgs, component, 'Gas',
+                                           'BASIN_NAME', 'Year')
+        comp_df = compute_combined_results(by, component)
+        all_results.append(comp_df)
 
-        # compute weighted mean by year and component
-        basin_year_means = compute_weighted_mean_by_year(
-            new_list_result_all_sgs, value_column=component, weight_column='Gas', 
-            basin_column='BASIN_NAME', year_column='Year'
-        )
-        # compute overall mean across sgs --> CHANGE THAT BECAUSE FOR NOW ONLY MEAN, NOT WEIGHTED MEAN.
-        component_results = compute_combined_results(basin_year_means, component)
-        all_results.append(component_results)
+    results_df = all_results[0]
+    for comp_df in all_results[1:]:
+        results_df = results_df.merge(comp_df, on=['BASIN_NAME','Year'], how='outer', suffixes=('', '_dup'))
+        if 'Gas_dup' in results_df.columns:
+            results_df['Gas'] = results_df[['Gas','Gas_dup']].sum(axis=1, skipna=True)
+            results_df.drop(columns=['Gas_dup'], inplace=True)
+        if 'Oil_dup' in results_df.columns:
+            results_df['Oil'] = results_df[['Oil','Oil_dup']].sum(axis=1, skipna=True)
+            results_df.drop(columns=['Oil_dup'], inplace=True)
 
-    # Merge results for all components into a single DataFrame
-    results_df_ghgrp_combined = all_results[0]
-    for component_results in all_results[1:]:
-        results_df_ghgrp_combined = results_df_ghgrp_combined.merge(
-            component_results, 
-            on=['BASIN_NAME', 'Year'], 
-            how='outer', 
-            suffixes=('', '_dup')
-        )
-        # Remove duplicate suffix columns for Gas and Oil
-        if 'Gas_dup' in results_df_ghgrp_combined.columns:
-            results_df_ghgrp_combined['Gas'] = results_df_ghgrp_combined[['Gas', 'Gas_dup']].sum(axis=1, skipna=True)
-            results_df_ghgrp_combined.drop(columns=['Gas_dup'], inplace=True)
-        if 'Oil_dup' in results_df_ghgrp_combined.columns:
-            results_df_ghgrp_combined['Oil'] = results_df_ghgrp_combined[['Oil', 'Oil_dup']].sum(axis=1, skipna=True)
-            results_df_ghgrp_combined.drop(columns=['Oil_dup'], inplace=True)
-
-    return results_df_ghgrp_combined
-
-# save average results by year by basin for figures for ghgrp
-data_source = "ghgrp" 
-filename = f"result_dic_r0175_{data_source}.pkl"
-
-with open(filename, "rb") as f:
-    result_dic = pickle.load(f)
-    
-radius_factor = 0.15
-# Initialize the dictionary with tqdm for progress monitoring
-results_df_ghgrp_combined_dict = {}
-for (a, b) in tqdm(zip([-1, 1, -1, 1], [-1, 1, 1, -1]), desc="Pairs of (a, b)", total=4, position=0):
-    for threshold in tqdm([1000], desc="Threshold", position=1, leave=False):
-        for keep_nanapis in tqdm([True], desc="Keep NaNs", position=2, leave=False):
-            print((a,b,threshold))
-            results_df_ghgrp_combined_dict[(a, b, threshold, keep_nanapis)] = return_results_df_ghgrp_combined(
-               result_dic, a, b, threshold, keep_nanapis, radius_factor
-            )
-with open("results_df_ghgrp_combined_dict.pkl", "wb") as f:
-    pickle.dump(results_df_ghgrp_combined_dict, f)
+    return results_df
 
 
-
-
+# =======================================================
+# USGS + GHGRP (shales) combined (Haynesville selection)
+# =======================================================
 def compute_combined_results_shales(basin_year_means, component_name):
+    """Same as compute_combined_results but keyed by Shale_play instead of BASIN_NAME."""
     results = []
-    
     for basin in set(b for b, _ in basin_year_means.keys()):
-        year_data = {year: basin_year_means[(basin, year)] 
-                     for b, year in basin_year_means.keys() if b == basin}
-        
-#         closest_years = sorted([y for y in year_data.keys() if y >= 2010], reverse=True)
-        
-        closest_years = sorted(year_data.keys())
-
-        for year in closest_years:
-            entries = year_data[year]  # List of dicts: each has weighted_mean, Oil, Gas
-            
+        year_data = {y: basin_year_means[(basin, y)]
+                     for b, y in basin_year_means.keys() if b == basin}
+        years = sorted(year_data.keys())
+        for year in years:
+            entries = year_data[year]
             if entries:
                 means = [e['weighted_mean'] for e in entries]
-                oils = [e['Oil'] for e in entries]
+                oils  = [e['Oil'] for e in entries]
                 gases = [e['Gas'] for e in entries]
-
-                mean_value = np.mean(means)
-                std_error = np.std(means, ddof=1) / np.sqrt(len(means))
-                total_oil = np.mean(oils)
-                total_gas = np.mean(gases)
+                mean_value = float(np.nanmean(means))
+                std_error  = float(np.nanstd(means, ddof=1) / np.sqrt(max(len(means),1)))
+                total_oil  = float(np.nanmean(oils))
+                total_gas  = float(np.nanmean(gases))
             else:
-                mean_value = np.nan
-                std_error = np.nan
-                total_oil = np.nan
-                total_gas = np.nan
-
+                mean_value = std_error = total_oil = total_gas = np.nan
             results.append({
                 'Shale_play': basin,
                 'Year': year,
@@ -631,7 +569,6 @@ def compute_combined_results_shales(basin_year_means, component_name):
                 'Oil': total_oil,
                 'Gas': total_gas
             })
-    
     return pd.DataFrame(results)
 
 
@@ -2375,15 +2312,3 @@ plt.savefig('figures_out/fractional_loss_comparison.eps', format='eps', dpi=300)
 plt.savefig('figures_out/fractional_loss_comparison.png', format='png', dpi=300)
 
 plt.show()
-
-
-
-
-
-
-
-
-
-
-
-

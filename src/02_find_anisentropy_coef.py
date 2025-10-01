@@ -14,12 +14,6 @@ import os
 import warnings
 warnings.filterwarnings("ignore")
 
-# Preferred by user; guarded in case the module isn't present
-try:
-    from di_scrubbing_func import *
-except Exception:
-    pass
-
 import numpy as np
 import pandas as pd
 import geopandas as gpd

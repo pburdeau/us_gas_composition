@@ -16,12 +16,6 @@ Notes
 -----
 - CRS conventions:
     * Input lon/lat are EPSG:4326; spatial work is done in EPSG:26914 (US feet/meters projection).
-- GeoPandas:
-    * Uses `predicate='within'` (modern) instead of deprecated `op='within'`.
-- Paths:
-    * Set ROOT/SHAPEFILE/USGS/GHGRP paths in the CONFIG section below.
-- Minor fix:
-    * `state_abbrev_to_name` → `state_abbreviations_to_names`
 """
 
 # ------------------------------ #

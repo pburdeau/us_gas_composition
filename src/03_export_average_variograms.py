@@ -12,11 +12,6 @@ Pipeline
    b) Stack (coords, values) across selected basins (masked to cells with Gas > 0).
    c) Fit an (isotropic) variogram with scikit-gstat.
    d) Save parameters to JSON and plot the fitted exponential model.
-
-Notes
------
-- Spatial coordinates X,Y are rescaled by alpha before gridding (space–time anisotropy).
-- skgstat `Variogram` supports nD coordinates; we pass (X, Y, T).
 """
 
 import warnings

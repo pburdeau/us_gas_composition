@@ -14,11 +14,6 @@ What this script does
    - NN results (result_all_nn)
 4) Export merged/evaluation CSVs for C1 (and C2 for USGS), per (a,b) block split.
 
-Notes
------
-- We keep your original behavior for *_prod columns:
-  they are set ONLY for GHGRP where you want them; not for USGS.
-- Small, safe robustness edits: ensure out_path exists; guards for empty file lists; ignore missing unnamed columns.
 """
 
 # ------------------------------ #

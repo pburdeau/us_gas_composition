@@ -23,7 +23,7 @@ from scipy.spatial.distance import pdist, squareform
 from statsmodels.formula.api import ols
 from scipy.optimize import minimize
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (kept for compatibility if used later)
+from mpl_toolkits.mplot3d import Axes3D 
 import matplotlib.ticker as mticker
 import seaborn as sns
 
